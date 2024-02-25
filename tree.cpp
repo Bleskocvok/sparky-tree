@@ -7,15 +7,16 @@
 #include <sys/stat.h>   /* fstatat */
 
 #include <cerrno>       /* errno */
-#include <iostream>
-#include <vector>
 #include <cstring>      /* strerror */
-#include <string>
-#include <iterator>
 #include <stdexcept>    /* runtime_error */
 #include <string_view>  /* sv */
 #include <memory>       /* shared_ptr */
-#include <optional>
+#include <optional>     /* nullopt */
+#include <utility>      /* exchange */
+#include <iostream>
+#include <vector>
+#include <string>
+#include <iterator>
 
 using namespace std::literals;
 
@@ -23,8 +24,8 @@ auto sys_err(const char* str)
 {
     int err = errno;
     return std::runtime_error(std::string(str) + ": ("
-                    + std::to_string(err) + ") "
-                    + std::strerror(err));
+                            + std::to_string(err) + ") "
+                            + std::strerror(err));
 }
 
 auto sys_errx(const char* str)
@@ -32,38 +33,80 @@ auto sys_errx(const char* str)
     return std::runtime_error(std::string(str));
 }
 
+std::string sys_err_str(const char* str)
+{
+    int err = errno;
+    return std::string(str) + ": ("
+         + std::to_string(err) + ") "
+         + std::strerror(err);
+}
+
 struct fd_t
 {
     int fd = -1;
 
     fd_t(int fd_) : fd(fd_) {}
-    ~fd_t() { if (fd != -1 && fd != AT_FDCWD) ::close(fd); }
+    ~fd_t() { close(); }
 
     fd_t(const fd_t&) = delete;
     fd_t& operator=(const fd_t&) = delete;
 
-    fd_t(fd_t&&) noexcept = default;
-    fd_t& operator=(fd_t&&) noexcept = default;
+    fd_t(fd_t&& o) noexcept
+        : fd(std::exchange(o.fd, -1))
+    { }
+
+    fd_t& operator=(fd_t&& o) noexcept
+    {
+        close();
+        fd = std::exchange(o.fd, -1);
+        return *this;
+    }
+
+    void close()
+    {
+        if (fd != -1 && fd != AT_FDCWD)
+            ::close(std::exchange(fd, -1));
+    }
 };
 
 struct dir_t
 {
-    DIR* dir;
+    DIR* dir = nullptr;
 
     dir_t(DIR* dir_) : dir(dir_) {}
-    ~dir_t() { if (dir) ::closedir(dir); }
+
+    ~dir_t() { close(); }
 
     dir_t(const dir_t&) = delete;
     dir_t& operator=(const dir_t&) = delete;
 
-    dir_t(dir_t&&) noexcept = default;
-    dir_t& operator=(dir_t&&) noexcept = default;
+    dir_t(dir_t&& other) noexcept
+        : dir(std::exchange(other.dir, nullptr))
+    { }
+
+    dir_t& operator=(dir_t&& other) noexcept
+    {
+        close();
+        dir = std::exchange(other.dir, nullptr);
+        return *this;
+    }
+
+    void close()
+    {
+        if (dir) ::closedir(std::exchange(dir, nullptr));
+    }
 };
 
 using shared_fd = std::shared_ptr<fd_t>;
 using shared_dir = std::shared_ptr<dir_t>;
 
 struct iter_t;
+
+struct directory_t
+{
+    shared_dir dir = nullptr;
+    std::optional<std::string> error = std::nullopt;
+};
 
 struct file_t
 {
@@ -81,19 +124,19 @@ struct file_t
         mode = st.st_mode;
     }
 
-    static DIR* make_dir(int at, const std::string& name)
+    static directory_t open_as_dir(int at, const std::string& name)
     {
         int fd = ::openat(at, name.c_str(), O_RDONLY | O_DIRECTORY);
         if (fd == -1)
-            throw sys_err("openat");
+            return { nullptr, sys_err_str("openat") };
 
         DIR* dir = ::fdopendir(fd);
         if (!dir)
         {
             ::close(fd);
-            throw sys_err("fdopendir");
+            return { nullptr, sys_err_str("fdopendir") };
         }
-        return dir;
+        return { std::make_shared<dir_t>(dir) };
     }
 
     friend std::ostream& operator<<(std::ostream& o, const file_t& f)
@@ -110,12 +153,12 @@ struct file_t
 struct iter_t
 {
     shared_fd at = nullptr;
-    shared_dir dir = nullptr;
+    directory_t dir;
     std::optional<std::string> d_name = std::nullopt;
 
     iter_t() = default;
 
-    iter_t(shared_fd at_, shared_dir dir_)
+    iter_t(shared_fd at_, directory_t dir_)
         : at(at_),
           dir(dir_)
     {
@@ -124,20 +167,22 @@ struct iter_t
 
     file_t operator*() const
     {
-        auto copy = std::make_shared<fd_t>(::dup(::dirfd(dir->dir)));
+        // omg
+        auto copy = std::make_shared<fd_t>(::dup(::dirfd(dir.dir->dir)));
         return file_t(copy, d_name.value());
     }
 
     iter_t& operator++()
     {
-        if (!dir)
-            throw sys_errx("++ on null dir");
+        if (!dir.dir)
+            // throw sys_errx("++ on null dir");
+            return *this;
 
         ::dirent* entry;
         do
         {
             errno = 0;
-            entry = ::readdir(dir->dir);
+            entry = ::readdir(dir.dir->dir);
 
         } while (entry && ( entry->d_name == "."sv
                          || entry->d_name == ".."sv ));
@@ -159,7 +204,7 @@ struct iter_t
 iter_t file_t::begin() const
 {
     if (!is_dir()) return end();
-    return iter_t(at, std::make_shared<dir_t>(make_dir(at->fd, name)));
+    return iter_t(at, open_as_dir(at->fd, name));
 }
 iter_t file_t::end() const { return iter_t(); }
 
