@@ -119,18 +119,21 @@ struct dir_t
 using shared_fd = std::shared_ptr<fd_t>;
 using shared_dir = std::shared_ptr<dir_t>;
 
+using maybe_err = std::optional<err_t>;
+
 struct iter_t;
 
 struct directory_t
 {
     shared_dir dir = nullptr;
-    std::optional<err_t> error = std::nullopt;
+    maybe_err error = {};
 };
 
 struct file_t
 {
     shared_fd at = nullptr;
     ::mode_t mode = 0;
+    maybe_err err_ = {};
 
     std::string name;
 
@@ -139,9 +142,12 @@ struct file_t
     {
         struct stat st;
         if (::fstatat(at->fd, name.c_str(), &st, AT_SYMLINK_NOFOLLOW) == -1)
-            throw sys_err("fstatat");
-        mode = st.st_mode;
+            err_ = sys_err_str("fstatat");
+        else
+            mode = st.st_mode;
     }
+
+    const auto& error() const { return err_; }
 
     static directory_t open_as_dir(int at, const std::string& name)
     {
@@ -160,10 +166,12 @@ struct file_t
 
     friend std::ostream& operator<<(std::ostream& o, const file_t& f)
     {
-        return o << f.name;
+        o << f.name;
+        if (f.error()) o << " " << *f.error();
+        return o;
     }
 
-    bool is_dir() const { return S_ISDIR(mode); }
+    bool is_dir() const { return !err_ && S_ISDIR(mode); }
 
     iter_t begin() const;
     iter_t end() const;
@@ -174,7 +182,7 @@ struct iter_t
     shared_fd at = nullptr;
     directory_t dir;
     std::optional<std::string> d_name = std::nullopt;
-    std::optional<err_t> err_ = std::nullopt;
+    maybe_err err_ = {};
 
     iter_t() = default;
 
@@ -280,16 +288,6 @@ void print(const Node& node, decltype(std::cout)& out = std::cout)
     print_rec(node, lines, out, true, true);
 }
 
-// void run(const file_t& file)
-// {
-//     std::cout << file.name << "\n";
-//     if (file.is_dir())
-//     {
-//         for (const file_t& f : file)
-//             run(f);
-//     }
-// }
-
 int main(int argc, char** argv)
 {
     auto show = [&](const auto path)
@@ -299,7 +297,6 @@ int main(int argc, char** argv)
     };
 
     OutputTerminal = bool(isatty(1));
-
 
     if (argc < 2)
         return show("."), 0;
