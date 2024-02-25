@@ -5,6 +5,7 @@
 #include <fcntl.h>      /* open */
 #include <sys/types.h>  /* DIR */
 #include <sys/stat.h>   /* fstatat */
+#include <unistd.h>     /* isatty */
 
 #include <cerrno>       /* errno */
 #include <cstring>      /* strerror */
@@ -17,6 +18,7 @@
 #include <vector>
 #include <string>
 #include <iterator>
+#include <variant>
 
 using namespace std::literals;
 
@@ -40,6 +42,23 @@ std::string sys_err_str(const char* str)
          + std::to_string(err) + ") "
          + std::strerror(err);
 }
+
+inline bool OutputTerminal = false;
+
+struct err_t
+{
+    std::string str;
+
+    err_t(std::string&& str) : str(str) {}
+
+    friend std::ostream& operator<<(std::ostream& o, const err_t& e)
+    {
+        return o
+            << ( OutputTerminal ? "\e[1;31m" : "" )
+            << "(error: " << e.str << ")"
+            << ( OutputTerminal ? "\e[0m" : "" );
+    }
+};
 
 struct fd_t
 {
@@ -105,7 +124,7 @@ struct iter_t;
 struct directory_t
 {
     shared_dir dir = nullptr;
-    std::optional<std::string> error = std::nullopt;
+    std::optional<err_t> error = std::nullopt;
 };
 
 struct file_t
@@ -155,15 +174,19 @@ struct iter_t
     shared_fd at = nullptr;
     directory_t dir;
     std::optional<std::string> d_name = std::nullopt;
+    std::optional<err_t> err_ = std::nullopt;
 
     iter_t() = default;
 
     iter_t(shared_fd at_, directory_t dir_)
         : at(at_),
-          dir(dir_)
+          dir(dir_),
+          err_(dir.error)
     {
-        ++(*this);
+        if (!err_) ++(*this);
     }
+
+    const auto& error() const { return dir.error; }
 
     file_t operator*() const
     {
@@ -175,8 +198,7 @@ struct iter_t
     iter_t& operator++()
     {
         if (!dir.dir)
-            // throw sys_errx("++ on null dir");
-            return *this;
+            throw sys_errx("++ on null dir");
 
         ::dirent* entry;
         do
@@ -188,7 +210,13 @@ struct iter_t
                          || entry->d_name == ".."sv ));
 
         if (!entry && errno != 0)
-            throw sys_err("readdir");
+        {
+            // throw sys_err("readdir");
+            err_ = sys_err_str("readdir");
+            // std::clog << *d_name << *err_ << "\n";
+            // d_name.reset();
+            return *this;
+        }
 
         d_name = entry ? decltype(d_name){ entry->d_name } : std::nullopt;
 
@@ -216,17 +244,30 @@ void print_rec(const Node& node, std::vector<bool>& lines,
         out << (l ? "│   " : "    ");
 
     if (!first) out << (last ? "└── " : "├── ");
-    out << node << "\n";
+    out << node;
 
     if (!first) lines.push_back(!last);
 
-    auto end = node.end();
-    decltype(end) next;
-    for (auto it = node.begin(); it != end; it = next)
+    if constexpr (requires{ node.begin(); node.end(); })
     {
-        next = it;
-        ++next;
-        print_rec(*it, lines, out, false, next == end);
+        auto end = node.end();
+        decltype(end) next;
+        auto it = node.begin();
+
+        if (it.error())
+            out << " " << *std::exchange(it, end).error();
+
+        out << "\n";
+
+        for (; it != end && !it.error(); it = next)
+        {
+            next = it;
+            ++next;
+            print_rec(*it, lines, out, false, next == end);
+        }
+
+        if (it.error())
+            print_rec(*it.error(), lines, out, false, next == end);
     }
 
     if (!first) lines.pop_back();
@@ -239,15 +280,15 @@ void print(const Node& node, decltype(std::cout)& out = std::cout)
     print_rec(node, lines, out, true, true);
 }
 
-void run(const file_t& file)
-{
-    std::cout << file.name << "\n";
-    if (file.is_dir())
-    {
-        for (const file_t& f : file)
-            run(f);
-    }
-}
+// void run(const file_t& file)
+// {
+//     std::cout << file.name << "\n";
+//     if (file.is_dir())
+//     {
+//         for (const file_t& f : file)
+//             run(f);
+//     }
+// }
 
 int main(int argc, char** argv)
 {
@@ -256,6 +297,9 @@ int main(int argc, char** argv)
         auto f = file_t(std::make_shared<fd_t>(AT_FDCWD), path);
         print(f);
     };
+
+    OutputTerminal = bool(isatty(1));
+
 
     if (argc < 2)
         return show("."), 0;
