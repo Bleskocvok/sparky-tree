@@ -22,14 +22,6 @@
 
 using namespace std::literals;
 
-auto sys_err(const char* str)
-{
-    int err = errno;
-    return std::runtime_error(std::string(str) + ": ("
-                            + std::to_string(err) + ") "
-                            + std::strerror(err));
-}
-
 auto sys_errx(const char* str)
 {
     return std::runtime_error(std::string(str));
@@ -219,10 +211,7 @@ struct iter_t
 
         if (!entry && errno != 0)
         {
-            // throw sys_err("readdir");
             err_ = sys_err_str("readdir");
-            // std::clog << *d_name << *err_ << "\n";
-            // d_name.reset();
             return *this;
         }
 
