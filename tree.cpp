@@ -6,6 +6,7 @@
 #include <sys/types.h>  /* DIR */
 #include <sys/stat.h>   /* fstatat */
 #include <unistd.h>     /* isatty */
+#include <unistd.h>     /* getopt */
 
 #include <cerrno>       /* errno */
 #include <cstring>      /* strerror */
@@ -16,7 +17,7 @@
 #include <utility>      /* exchange */
 #include <iostream>
 #include <vector>
-#include <string>
+#include <string>       /* string, stoi */
 #include <iterator>
 #include <variant>
 
@@ -235,8 +236,13 @@ iter_t file_t::end() const { return iter_t(); }
 
 template<typename Node>
 void print_rec(const Node& node, std::vector<bool>& lines,
-               decltype(std::cout)& out, bool first, bool last)
+               decltype(std::cout)& out, bool first, bool last,
+               int depth = -1)
 {
+    if (depth == 0) return;
+    if (depth == -1) depth = 0;
+    --depth;
+
     for (int l : lines)
         out << (l ? "│   " : "    ");
 
@@ -260,32 +266,56 @@ void print_rec(const Node& node, std::vector<bool>& lines,
         {
             next = it;
             ++next;
-            print_rec(*it, lines, out, false, next == end);
+            print_rec(*it, lines, out, false, next == end, depth);
         }
 
         if (it.error())
-            print_rec(*it.error(), lines, out, false, next == end);
+            print_rec(*it.error(), lines, out, false, next == end, depth);
     }
 
     if (!first) lines.pop_back();
 }
 
 template<typename Node>
-void print(const Node& node, decltype(std::cout)& out = std::cout)
+void print(const Node& node, decltype(std::cout)& out = std::cout,
+           int depth = -1)
 {
     std::vector<bool> lines;
-    print_rec(node, lines, out, true, true);
+    print_rec(node, lines, out, true, true, depth);
+}
+
+void usage(char** argv)
+{
+    fprintf(stderr, "usage: %s [-h] [-d depth] [DIR...]\n", argv[0]);
 }
 
 int main(int argc, char** argv)
 {
+    int depth = -1;
+
     auto show = [&](const auto path)
     {
         auto f = file_t(std::make_shared<fd_t>(AT_FDCWD), path);
-        print(f);
+        print(f, std::cout, depth);
     };
 
     OutputTerminal = bool(isatty(1));
+
+    const char* optstr = "hd:";
+    char c;
+    while ((c = getopt(argc, argv, optstr)) != -1)
+    {
+        switch (c)
+        {
+            case 'h': return usage(argv), 0;
+            case 'd': depth = std::stoi(optarg); break;
+            default: return usage(argv), 1;
+        }
+    }
+    argc -= optind - 1;
+    argv += optind - 1;
+
+    if (depth != -1) ++depth;
 
     if (argc < 2)
         return show("."), 0;
