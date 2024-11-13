@@ -234,6 +234,13 @@ iter_t file_t::begin() const
 }
 iter_t file_t::end() const { return iter_t(); }
 
+class printer
+{
+    bool show_hidden = false;
+public:
+
+    printer(bool show_hidden) : show_hidden(show_hidden) {}
+
 template<typename Node>
 void print_rec(const Node& node, std::vector<bool>& lines,
                decltype(std::cout)& out, bool first, bool last,
@@ -246,6 +253,12 @@ void print_rec(const Node& node, std::vector<bool>& lines,
     for (int l : lines)
         out << (l ? "│   " : "    ");
 
+    // if constexpr (requires{ node.begin(); node.end(); })
+    // {
+    //     if (!first && node.begin().error()) out << (last ? "└╲─ " : "├╲─ ");
+    //     else if (!first)                    out << (last ? "└── " : "├── ");
+    // }
+    // else if (!first) out << (last ? "└── " : "├── ");
     if (!first) out << (last ? "└── " : "├── ");
     out << node;
 
@@ -262,11 +275,24 @@ void print_rec(const Node& node, std::vector<bool>& lines,
 
         out << "\n";
 
+        auto is_hidden = [&](const auto& iter)
+        {
+            // if (!show_hidden && !iter.d_name->empty() && iter.d_name->front() == '.')
+            //     return true;
+            // return false;
+            // Need to keep the ending condition, obviously.
+            return iter != end && !it.error()
+                && !show_hidden && !iter.d_name->empty()
+                                && iter.d_name->front() == '.';
+        };
+
         for (; it != end && !it.error(); it = next)
         {
             next = it;
-            ++next;
-            print_rec(*it, lines, out, false, next == end, depth);
+            // ++next;
+            do { ++next; } while (is_hidden(next));
+            if (!is_hidden(it))
+                print_rec(*it, lines, out, false, next == end, depth);
         }
 
         if (it.error())
@@ -284,6 +310,8 @@ void print(const Node& node, decltype(std::cout)& out = std::cout,
     print_rec(node, lines, out, true, true, depth);
 }
 
+};
+
 void usage(char** argv)
 {
     fprintf(stderr, "usage: %s [-h] [-d depth] [DIR...]\n", argv[0]);
@@ -292,16 +320,17 @@ void usage(char** argv)
 int main(int argc, char** argv)
 {
     int depth = -1;
+    bool show_hidden = false;
 
     auto show = [&](const auto path)
     {
         auto f = file_t(std::make_shared<fd_t>(AT_FDCWD), path);
-        print(f, std::cout, depth);
+        printer(show_hidden).print(f, std::cout, depth);
     };
 
     OutputTerminal = bool(isatty(1));
 
-    const char* optstr = "hd:";
+    const char* optstr = "hd:a";
     char c;
     while ((c = getopt(argc, argv, optstr)) != -1)
     {
@@ -309,6 +338,7 @@ int main(int argc, char** argv)
         {
             case 'h': return usage(argv), 0;
             case 'd': depth = std::stoi(optarg); break;
+            case 'a': show_hidden = true; break;
             default: return usage(argv), 1;
         }
     }
